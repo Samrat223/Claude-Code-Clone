@@ -1,5 +1,6 @@
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -10,8 +11,12 @@ import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.models.FunctionDefinition;
 import com.openai.models.FunctionParameters;
 import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.models.chat.completions.ChatCompletionTool;
+import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
+import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
 
 public class Main {
     public static void main(String[] args) {
@@ -22,7 +27,7 @@ public class Main {
 
         String prompt = args[1];
 
-        String apiKey = System.getenv("OPENROUTER_API_KEY");
+        var apiKey = System.getenv("OPENROUTER_API_KEY");
         String baseUrl = System.getenv("OPENROUTER_BASE_URL");
         if (baseUrl == null || baseUrl.isEmpty()) {
             baseUrl = "https://openrouter.ai/api/v1";
@@ -37,55 +42,77 @@ public class Main {
                 .baseUrl(baseUrl)
                 .build();
 
-        ChatCompletion response = client.chat().completions().create(
-                ChatCompletionCreateParams.builder()
-                        .model("anthropic/claude-haiku-4.5")
-                        .addUserMessage(prompt)
-                        .addTool(ChatCompletionTool.builder()
-                            .function(FunctionDefinition.builder()
-                                .name("Read")
-                                .description("Read and return the contents of a file")
-                                .parameters(FunctionParameters.builder()
-                                    .putAdditionalProperty("type", com.openai.core.JsonValue.from("object"))
-                                    .putAdditionalProperty("properties", com.openai.core.JsonValue.from(Map.of(
+        List<ChatCompletionMessageParam> messages = new ArrayList<>();
+        messages.add(ChatCompletionMessageParam.ofUser(
+                ChatCompletionUserMessageParam.builder().content(prompt).build()));
+
+        ChatCompletionTool readTool = ChatCompletionTool.builder()
+                .function(FunctionDefinition.builder()
+                        .name("Read")
+                        .description("Read and return the contents of a file")
+                        .parameters(FunctionParameters.builder()
+                                .putAdditionalProperty("type", com.openai.core.JsonValue.from("object"))
+                                .putAdditionalProperty("properties", com.openai.core.JsonValue.from(Map.of(
                                         "file_path", Map.of("type", "string")
-                                    )))
-                                    .putAdditionalProperty("required", com.openai.core.JsonValue.from(List.of("file_path")))
-                                    .build())
+                                )))
+                                .putAdditionalProperty("required", com.openai.core.JsonValue.from(List.of("file_path")))
                                 .build())
-                            .build())
-                        .build()
-        );
+                        .build())
+                .build();
 
-        if (response.choices().isEmpty()) {
-            throw new RuntimeException("no choices in response");
-        }
+        while (true) {
+            ChatCompletion response = client.chat().completions().create(
+                    ChatCompletionCreateParams.builder()
+                            .model("anthropic/claude-haiku-4.5")
+                            .messages(messages)
+                            .addTool(readTool)
+                            .build());
 
-        var message = response.choices().get(0).message();
-        if (message.toolCalls().isPresent() && !message.toolCalls().get().isEmpty()) {
-            var toolCall = message.toolCalls().get().get(0);
-            if (!"Read".equals(toolCall.function().name())) {
-                throw new RuntimeException("unsupported tool: " + toolCall.function().name());
+            if (response.choices().isEmpty()) {
+                throw new RuntimeException("no choices in response");
             }
 
-            JsonNode arguments;
-            try {
-                arguments = new ObjectMapper().readTree(toolCall.function().arguments());
-            } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
-                throw new RuntimeException("invalid Read tool arguments", exception);
-            }
-            String filePath = arguments.path("file_path").asText(null);
-            if (filePath == null) {
-                throw new RuntimeException("Read tool call is missing file_path");
+            var message = response.choices().get(0).message();
+            List<com.openai.models.chat.completions.ChatCompletionMessageToolCall> toolCalls =
+                    message.toolCalls().orElse(List.of());
+            ChatCompletionAssistantMessageParam.Builder assistantMessage =
+                    ChatCompletionAssistantMessageParam.builder().toolCalls(toolCalls);
+            message.content().ifPresent(assistantMessage::content);
+            messages.add(ChatCompletionMessageParam.ofAssistant(assistantMessage.build()));
+
+            if (toolCalls.isEmpty()) {
+                System.out.print(message.content().orElse(""));
+                return;
             }
 
-            try {
-                System.out.print(Files.readString(Path.of(filePath)));
-            } catch (java.io.IOException exception) {
-                throw new RuntimeException("failed to read file: " + filePath, exception);
+            for (var toolCall : toolCalls) {
+                if (!"Read".equals(toolCall.function().name())) {
+                    throw new RuntimeException("unsupported tool: " + toolCall.function().name());
+                }
+
+                JsonNode arguments;
+                try {
+                    arguments = new ObjectMapper().readTree(toolCall.function().arguments());
+                } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+                    throw new RuntimeException("invalid Read tool arguments", exception);
+                }
+                String filePath = arguments.path("file_path").asText(null);
+                if (filePath == null) {
+                    throw new RuntimeException("Read tool call is missing file_path");
+                }
+
+                String fileContents;
+                try {
+                    fileContents = Files.readString(Path.of(filePath));
+                } catch (java.io.IOException exception) {
+                    throw new RuntimeException("failed to read file: " + filePath, exception);
+                }
+                messages.add(ChatCompletionMessageParam.ofTool(
+                        ChatCompletionToolMessageParam.builder()
+                                .toolCallId(toolCall.id())
+                                .content(fileContents)
+                                .build()));
             }
-        } else {
-            System.out.print(message.content().orElse(""));
         }
     }
 }
