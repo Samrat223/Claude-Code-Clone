@@ -1,6 +1,14 @@
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.models.FunctionDefinition;
+import com.openai.models.FunctionParameters;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionTool;
@@ -35,8 +43,15 @@ public class Main {
                         .addUserMessage(prompt)
                         .addTool(ChatCompletionTool.builder()
                             .function(FunctionDefinition.builder()
-                                .name("read_file")
+                                .name("Read")
                                 .description("Read and return the contents of a file")
+                                .parameters(FunctionParameters.builder()
+                                    .putAdditionalProperty("type", com.openai.core.JsonValue.from("object"))
+                                    .putAdditionalProperty("properties", com.openai.core.JsonValue.from(Map.of(
+                                        "file_path", Map.of("type", "string")
+                                    )))
+                                    .putAdditionalProperty("required", com.openai.core.JsonValue.from(List.of("file_path")))
+                                    .build())
                                 .build())
                             .build())
                         .build()
@@ -46,10 +61,31 @@ public class Main {
             throw new RuntimeException("no choices in response");
         }
 
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
-        System.err.println("Logs from your program will appear here!");
+        var message = response.choices().get(0).message();
+        if (message.toolCalls().isPresent() && !message.toolCalls().get().isEmpty()) {
+            var toolCall = message.toolCalls().get().get(0);
+            if (!"Read".equals(toolCall.function().name())) {
+                throw new RuntimeException("unsupported tool: " + toolCall.function().name());
+            }
 
-        // TODO: Uncomment the line below to pass the first stage
-         System.out.print(response.choices().get(0).message().content().orElse(""));
+            JsonNode arguments;
+            try {
+                arguments = new ObjectMapper().readTree(toolCall.function().arguments());
+            } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
+                throw new RuntimeException("invalid Read tool arguments", exception);
+            }
+            String filePath = arguments.path("file_path").asText(null);
+            if (filePath == null) {
+                throw new RuntimeException("Read tool call is missing file_path");
+            }
+
+            try {
+                System.out.print(Files.readString(Path.of(filePath)));
+            } catch (java.io.IOException exception) {
+                throw new RuntimeException("failed to read file: " + filePath, exception);
+            }
+        } else {
+            System.out.print(message.content().orElse(""));
+        }
     }
 }
