@@ -81,6 +81,23 @@ public class Main {
                         .build())
                     .build();
 
+                ChatCompletionTool bashTool = ChatCompletionTool.builder()
+                    .function(FunctionDefinition.builder()
+                        .name("Bash")
+                        .description("Execute a shell command")
+                        .parameters(FunctionParameters.builder()
+                            .putAdditionalProperty("type", com.openai.core.JsonValue.from("object"))
+                            .putAdditionalProperty("properties", com.openai.core.JsonValue.from(Map.of(
+                                "command", Map.of(
+                                    "type", "string",
+                                    "description", "The shell command to execute"
+                                )
+                            )))
+                            .putAdditionalProperty("required", com.openai.core.JsonValue.from(List.of("command")))
+                            .build())
+                        .build())
+                    .build();
+
         while (true) {
             ChatCompletion response = client.chat().completions().create(
                     ChatCompletionCreateParams.builder()
@@ -88,6 +105,7 @@ public class Main {
                             .messages(messages)
                             .addTool(readTool)
                             .addTool(writeTool)
+                            .addTool(bashTool)
                             .build());
 
             if (response.choices().isEmpty()) {
@@ -114,19 +132,28 @@ public class Main {
                 } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
                     throw new RuntimeException("invalid tool arguments", exception);
                 }
-                String filePath = arguments.path("file_path").asText(null);
-                if (filePath == null) {
-                    throw new RuntimeException("tool call is missing file_path");
-                }
-
                 String toolResult;
-                if ("Read".equals(toolCall.function().name())) {
+                if ("Bash".equals(toolCall.function().name())) {
+                    String command = arguments.path("command").asText(null);
+                    if (command == null) {
+                        throw new RuntimeException("Bash tool call is missing command");
+                    }
+                    toolResult = executeBash(command);
+                } else if ("Read".equals(toolCall.function().name())) {
+                    String filePath = arguments.path("file_path").asText(null);
+                    if (filePath == null) {
+                        throw new RuntimeException("Read tool call is missing file_path");
+                    }
                     try {
                         toolResult = Files.readString(Path.of(filePath));
                     } catch (java.io.IOException exception) {
                         throw new RuntimeException("failed to read file: " + filePath, exception);
                     }
                 } else if ("Write".equals(toolCall.function().name())) {
+                    String filePath = arguments.path("file_path").asText(null);
+                    if (filePath == null) {
+                        throw new RuntimeException("Write tool call is missing file_path");
+                    }
                     String content = arguments.path("content").asText(null);
                     if (content == null) {
                         throw new RuntimeException("Write tool call is missing content");
@@ -147,6 +174,25 @@ public class Main {
                                 .content(toolResult)
                                 .build()));
             }
+        }
+    }
+
+    private static String executeBash(String command) {
+        try {
+            Process process = new ProcessBuilder("/bin/sh", "-c", command)
+                    .redirectErrorStream(true)
+                    .start();
+            String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            int exitCode = process.waitFor();
+            if (exitCode == 0) {
+                return output;
+            }
+            return output + "\nCommand exited with code " + exitCode;
+        } catch (java.io.IOException exception) {
+            throw new RuntimeException("failed to execute Bash command", exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Bash command was interrupted", exception);
         }
     }
 }
