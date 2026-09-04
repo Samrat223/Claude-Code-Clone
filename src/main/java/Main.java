@@ -60,12 +60,34 @@ public class Main {
                         .build())
                 .build();
 
+                ChatCompletionTool writeTool = ChatCompletionTool.builder()
+                    .function(FunctionDefinition.builder()
+                        .name("Write")
+                        .description("Write content to a file")
+                        .parameters(FunctionParameters.builder()
+                            .putAdditionalProperty("type", com.openai.core.JsonValue.from("object"))
+                            .putAdditionalProperty("properties", com.openai.core.JsonValue.from(Map.of(
+                                "file_path", Map.of(
+                                    "type", "string",
+                                    "description", "The path of the file to write"
+                                ),
+                                "content", Map.of(
+                                    "type", "string",
+                                    "description", "The content to write to the file"
+                                )
+                            )))
+                            .putAdditionalProperty("required", com.openai.core.JsonValue.from(List.of("file_path", "content")))
+                            .build())
+                        .build())
+                    .build();
+
         while (true) {
             ChatCompletion response = client.chat().completions().create(
                     ChatCompletionCreateParams.builder()
                             .model("anthropic/claude-haiku-4.5")
                             .messages(messages)
                             .addTool(readTool)
+                            .addTool(writeTool)
                             .build());
 
             if (response.choices().isEmpty()) {
@@ -86,31 +108,43 @@ public class Main {
             }
 
             for (var toolCall : toolCalls) {
-                if (!"Read".equals(toolCall.function().name())) {
-                    throw new RuntimeException("unsupported tool: " + toolCall.function().name());
-                }
-
                 JsonNode arguments;
                 try {
                     arguments = new ObjectMapper().readTree(toolCall.function().arguments());
                 } catch (com.fasterxml.jackson.core.JsonProcessingException exception) {
-                    throw new RuntimeException("invalid Read tool arguments", exception);
+                    throw new RuntimeException("invalid tool arguments", exception);
                 }
                 String filePath = arguments.path("file_path").asText(null);
                 if (filePath == null) {
-                    throw new RuntimeException("Read tool call is missing file_path");
+                    throw new RuntimeException("tool call is missing file_path");
                 }
 
-                String fileContents;
-                try {
-                    fileContents = Files.readString(Path.of(filePath));
-                } catch (java.io.IOException exception) {
-                    throw new RuntimeException("failed to read file: " + filePath, exception);
+                String toolResult;
+                if ("Read".equals(toolCall.function().name())) {
+                    try {
+                        toolResult = Files.readString(Path.of(filePath));
+                    } catch (java.io.IOException exception) {
+                        throw new RuntimeException("failed to read file: " + filePath, exception);
+                    }
+                } else if ("Write".equals(toolCall.function().name())) {
+                    String content = arguments.path("content").asText(null);
+                    if (content == null) {
+                        throw new RuntimeException("Write tool call is missing content");
+                    }
+                    try {
+                        Files.writeString(Path.of(filePath), content);
+                    } catch (java.io.IOException exception) {
+                        throw new RuntimeException("failed to write file: " + filePath, exception);
+                    }
+                    toolResult = "File written successfully";
+                } else {
+                    throw new RuntimeException("unsupported tool: " + toolCall.function().name());
                 }
+
                 messages.add(ChatCompletionMessageParam.ofTool(
                         ChatCompletionToolMessageParam.builder()
                                 .toolCallId(toolCall.id())
-                                .content(fileContents)
+                                .content(toolResult)
                                 .build()));
             }
         }
